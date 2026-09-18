@@ -1,0 +1,100 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI PDF Assistant</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar: Upload & Document Metrics -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">📄</div>
+        <div>
+          <h2>AI PDF Assistant</h2>
+          <p class="subtitle">RAG Document Q&A</p>
+        </div>
+      </div>
+
+      <div class="upload-section">
+        <label class="section-title">Upload Document</label>
+        <div id="drop-zone" class="drop-zone">
+          <input type="file" id="file-input" accept=".pdf" />
+          <div class="drop-content">
+            <span class="upload-icon">📁</span>
+            <p class="drop-text">Drag & drop your PDF here</p>
+            <span class="browse-btn">or browse file</span>
+            <span class="limit-badge">PDF only (Max 20MB)</span>
+          </div>
+        </div>
+        <button id="upload-btn" class="primary-btn" disabled>Upload & Process</button>
+      </div>
+
+      <!-- Processing State / Status Box -->
+      <div id="status-card" class="status-card hidden">
+        <div id="status-spinner" class="spinner hidden"></div>
+        <div class="status-info">
+          <p id="status-message" class="status-message">Ready</p>
+          <div id="doc-meta" class="doc-meta hidden">
+            <p><strong>File:</strong> <span id="meta-filename">-</span></p>
+            <div class="metrics-grid">
+              <div class="metric-box">
+                <span class="metric-label">Pages</span>
+                <span id="meta-pages" class="metric-val">0</span>
+              </div>
+              <div class="metric-box">
+                <span class="metric-label">Chunks</span>
+                <span id="meta-chunks" class="metric-val">0</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Chat Workspace -->
+    <main class="chat-container">
+      <header class="chat-header">
+        <div>
+          <h1 id="chat-title">Document Q&A</h1>
+          <p id="chat-status" class="chat-status">Upload a PDF on the left to start asking questions.</p>
+        </div>
+      </header>
+
+      <!-- Message Thread -->
+      <div id="chat-messages" class="chat-messages">
+        <div class="message assistant-msg">
+          <div class="avatar">🤖</div>
+          <div class="bubble">
+            <p>Welcome! Once you upload a PDF, I'll extract its contents into a vector index and answer questions strictly using facts from the document.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Question Input Bar -->
+      <footer class="chat-input-wrapper">
+        <form id="chat-form" class="chat-form">
+          <input 
+            type="text" 
+            id="question-input" 
+            placeholder="Ask a question about your PDF..." 
+            autocomplete="off" 
+            disabled 
+          />
+          <button type="submit" id="send-btn" class="send-btn" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+            </svg>
+          </button>
+        </form>
+      </footer>
+    </main>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+﻿# Environment & Secrets
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Data artifacts (keep folder structure via .gitkeep, ignore files)
+data/uploads/*
+!data/uploads/.gitkeep
+data/vector_store/*
+!data/vector_store/.gitkeep
