@@ -1,204 +1,162 @@
 ﻿document.addEventListener("DOMContentLoaded", () => {
-  const dropZone = document.getElementById("drop-zone");
-  const fileInput = document.getElementById("file-input");
-  const uploadBtn = document.getElementById("upload-btn");
-  const statusCard = document.getElementById("status-card");
-  const statusMessage = document.getElementById("status-message");
-  const statusSpinner = document.getElementById("status-spinner");
-  const docMeta = document.getElementById("doc-meta");
-  const metaFilename = document.getElementById("meta-filename");
-  const metaPages = document.getElementById("meta-pages");
-  const metaChunks = document.getElementById("meta-chunks");
-
-  const chatMessages = document.getElementById("chat-messages");
-  const chatForm = document.getElementById("chat-form");
-  const questionInput = document.getElementById("question-input");
-  const sendBtn = document.getElementById("send-btn");
-  const chatStatus = document.getElementById("chat-status");
+  const dropZone = document.getElementById("dropZone");
+  const fileInput = document.getElementById("fileInput");
+  const uploadBtn = document.getElementById("uploadBtn");
+  const uploadStatus = document.getElementById("uploadStatus");
+  const fileNameDisplay = document.getElementById("fileName");
+  const pageCountDisplay = document.getElementById("pageCount");
+  const chunkCountDisplay = document.getElementById("chunkCount");
+  const chatForm = document.getElementById("chatForm");
+  const userInput = document.getElementById("userInput");
+  const sendBtn = document.getElementById("sendBtn");
+  const messagesContainer = document.getElementById("messagesContainer");
 
   let selectedFile = null;
 
-  ["dragenter", "dragover"].forEach(event => {
-    dropZone.addEventListener(event, (e) => {
-      e.preventDefault();
-      dropZone.classList.add("dragover");
+  // Drag & drop handlers
+  if (dropZone && fileInput) {
+    dropZone.addEventListener("click", () => fileInput.click());
+
+    ["dragenter", "dragover"].forEach((eventName) => {
+      dropZone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = "#6366f1";
+      });
     });
-  });
 
-  ["dragleave", "drop"].forEach(event => {
-    dropZone.addEventListener(event, (e) => {
-      e.preventDefault();
-      dropZone.classList.remove("dragover");
+    ["dragleave", "drop"].forEach((eventName) => {
+      dropZone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = "#374151";
+      });
     });
-  });
 
-  dropZone.addEventListener("drop", (e) => {
-    if (e.dataTransfer.files.length > 0) {
-      handleFileSelection(e.dataTransfer.files[0]);
-    }
-  });
+    dropZone.addEventListener("drop", (e) => {
+      const files = e.dataTransfer.files;
+      if (files.length > 0 && files[0].name.endsWith(".pdf")) {
+        fileInput.files = files;
+        handleFileSelect(files[0]);
+      } else {
+        alert("Please drop a valid PDF file.");
+      }
+    });
 
-  fileInput.addEventListener("change", () => {
-    if (fileInput.files.length > 0) {
-      handleFileSelection(fileInput.files[0]);
-    }
-  });
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        handleFileSelect(e.target.files[0]);
+      }
+    });
+  }
 
-  function handleFileSelection(file) {
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
-      showStatus("Only PDF files are supported.", "error");
-      uploadBtn.disabled = true;
-      selectedFile = null;
-      return;
-    }
-    if (file.size > 20 * 1024 * 1024) {
-      showStatus("File exceeds maximum allowed size of 20MB.", "error");
-      uploadBtn.disabled = true;
-      selectedFile = null;
-      return;
-    }
-
+  function handleFileSelect(file) {
     selectedFile = file;
-    showStatus(`Selected: ${file.name}`, "info");
-    uploadBtn.disabled = false;
+    if (uploadStatus) uploadStatus.textContent = `Selected: ${file.name}`;
+    if (uploadBtn) uploadBtn.disabled = false;
   }
 
-  function showStatus(message, type = "info", showLoading = false) {
-    statusCard.classList.remove("hidden");
-    statusMessage.textContent = message;
-    statusSpinner.classList.toggle("hidden", !showLoading);
+  // Upload handler
+  if (uploadBtn) {
+    uploadBtn.addEventListener("click", async () => {
+      if (!selectedFile) {
+        alert("Please select a PDF file first.");
+        return;
+      }
 
-    if (type === "error") {
-      statusMessage.style.color = "var(--danger)";
-    } else if (type === "success") {
-      statusMessage.style.color = "var(--success)";
-    } else {
-      statusMessage.style.color = "var(--text-main)";
-    }
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+
+      uploadBtn.disabled = true;
+      if (uploadStatus) uploadStatus.textContent = "Uploading & processing...";
+
+      try {
+        console.log("Sending upload request...");
+        const res = await fetch("/upload", {
+          method: "POST",
+          body: formData,
+        });
+
+        console.log("Upload response status:", res.status);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || `Server error (${res.status})`);
+        }
+
+        const data = await res.json();
+        console.log("Upload success:", data);
+        if (uploadStatus) uploadStatus.textContent = "Ready";
+        if (fileNameDisplay) fileNameDisplay.textContent = data.filename || selectedFile.name;
+        if (pageCountDisplay) pageCountDisplay.textContent = data.page_count ?? "-";
+        if (chunkCountDisplay) chunkCountDisplay.textContent = data.chunk_count ?? "-";
+
+        if (userInput) userInput.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+
+        appendMessage("system", `Document "${selectedFile.name}" indexed successfully! Ask anything about it.`);
+      } catch (err) {
+        console.error("Upload error:", err);
+        if (uploadStatus) uploadStatus.textContent = "Error processing document";
+        alert(`Upload failed: ${err.message}`);
+        uploadBtn.disabled = false;
+      }
+    });
   }
 
-  uploadBtn.addEventListener("click", async () => {
-    if (!selectedFile) return;
+  // Chat message submission
+  if (chatForm) {
+    chatForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const question = userInput.value.trim();
+      if (!question) return;
 
-    uploadBtn.disabled = true;
-    showStatus("Extracting text, chunking, & embedding into FAISS...", "info", true);
+      appendMessage("user", question);
+      userInput.value = "";
+      userInput.disabled = true;
+      if (sendBtn) sendBtn.disabled = true;
 
-    const formData = new FormData();
-    formData.append("file", selectedFile);
+      const botMessageEl = appendMessage("assistant", "Thinking...");
 
-    try {
-      const res = await fetch("/upload", {
-        method: "POST",
-        body: formData
-      });
+      try {
+        const res = await fetch("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+        });
 
-      const data = await res.json();
+        if (!res.ok) throw new Error("Failed to get answer");
 
-      if (!res.ok) {
-        throw new Error(data.detail || "Upload failed");
+        const data = await res.json();
+        botMessageEl.querySelector(".bubble").textContent = data.answer || data.response || "No response received.";
+      } catch (err) {
+        botMessageEl.querySelector(".bubble").textContent = `Error: ${err.message}`;
+      } finally {
+        userInput.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+        userInput.focus();
       }
+    });
+  }
 
-      showStatus("PDF processed successfully!", "success", false);
-      docMeta.classList.remove("hidden");
-      metaFilename.textContent = data.filename;
-      metaPages.textContent = data.pages;
-      metaChunks.textContent = data.chunks;
+  function appendMessage(sender, text) {
+    if (!messagesContainer) return null;
 
-      questionInput.disabled = false;
-      sendBtn.disabled = false;
-      chatStatus.textContent = `Active Document: ${data.filename}`;
-      questionInput.focus();
-
-    } catch (err) {
-      showStatus(err.message, "error", false);
-      uploadBtn.disabled = false;
-    }
-  });
-
-  chatForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const question = questionInput.value.trim();
-    if (!question) return;
-
-    appendMessage(question, "user");
-    questionInput.value = "";
-    questionInput.disabled = true;
-    sendBtn.disabled = true;
-
-    const loadingId = appendMessage("Searching document & generating answer...", "assistant", true);
-
-    try {
-      const res = await fetch("/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question })
-      });
-
-      const data = await res.json();
-      document.getElementById(loadingId)?.remove();
-
-      if (!res.ok) {
-        throw new Error(data.detail || "Failed to retrieve answer");
-      }
-
-      appendMessage(data.answer, "assistant", false, data.sources);
-
-    } catch (err) {
-      document.getElementById(loadingId)?.remove();
-      appendMessage(`Error: ${err.message}`, "assistant");
-    } finally {
-      questionInput.disabled = false;
-      sendBtn.disabled = false;
-      questionInput.focus();
-    }
-  });
-
-  function appendMessage(text, sender, isLoading = false, sources = []) {
-    const msgId = "msg-" + Date.now();
     const msgDiv = document.createElement("div");
-    msgDiv.id = msgId;
-    msgDiv.classList.add("message", sender === "user" ? "user-msg" : "assistant-msg");
+    msgDiv.className = `message ${sender}-message`;
 
-    const avatar = document.createElement("div");
+    const avatar = document.createElement("span");
     avatar.className = "avatar";
-    avatar.textContent = sender === "user" ? "👤" : "🤖";
+    avatar.textContent = sender === "user" ? "👤" : sender === "assistant" ? "🤖" : "ℹ️";
 
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-
-    if (isLoading) {
-      bubble.style.fontStyle = "italic";
-      bubble.style.color = "var(--text-muted)";
-    }
-
-    const p = document.createElement("p");
-    p.textContent = text;
-    bubble.appendChild(p);
-
-    if (sources && sources.length > 0) {
-      const sourcesBox = document.createElement("div");
-      sourcesBox.className = "sources-box";
-
-      const sourcesTitle = document.createElement("div");
-      sourcesTitle.className = "sources-title";
-      sourcesTitle.textContent = "Sources";
-      sourcesBox.appendChild(sourcesTitle);
-
-      sources.forEach(src => {
-        const badge = document.createElement("span");
-        badge.className = "source-badge";
-        badge.textContent = `${src.filename} — Page ${src.page}`;
-        sourcesBox.appendChild(badge);
-      });
-
-      bubble.appendChild(sourcesBox);
-    }
+    bubble.textContent = text;
 
     msgDiv.appendChild(avatar);
     msgDiv.appendChild(bubble);
-    chatMessages.appendChild(msgDiv);
+    messagesContainer.appendChild(msgDiv);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
 
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    return msgId;
+    return msgDiv;
   }
 });

@@ -95,3 +95,7 @@ class PDFProcessor:
             )
 
         return pages_data
+
+    # Backward compatibility aliases inside the class
+    extract_text = extract_text_by_page
+    extract_pages = extract_text_by_page

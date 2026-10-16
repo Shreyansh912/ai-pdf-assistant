@@ -42,3 +42,6 @@ class EmbeddingService:
 
         # FAISS requires contiguous float32 data
         return np.ascontiguousarray(embeddings, dtype=np.float32)
+
+        # Alias for backward compatibility
+    encode = generate_embeddings

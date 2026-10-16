@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from backend.main import app
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def client():
     with TestClient(app) as test_client:
         yield test_client
@@ -64,7 +64,6 @@ def test_upload_valid_pdf_and_ask(client):
         "sources": [{"filename": "test_doc.pdf", "page": 1}]
     }
     app.state.rag_service = mock_rag
-
     # 4. Ask a question
     ask_res = client.post("/ask", json={"question": "What is alpha?"})
     assert ask_res.status_code == 200

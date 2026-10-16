@@ -1,137 +1,134 @@
-﻿from typing import List, Dict, Any, Optional
+import json
+from typing import AsyncGenerator, Dict, Any, List, Optional
 from google import genai
 from google.genai import types
-from backend.services.embeddings import EmbeddingService
-from backend.services.vector_store import VectorStore
 
 
 class RAGService:
-    """
-    Orchestrates the complete Retrieval-Augmented Generation (RAG) pipeline:
-    Question -> Query Embedding -> Vector Retrieval -> Context Assembly -> LLM Generation.
-    """
-
-    SYSTEM_INSTRUCTION = (
-        "You are an AI assistant that answers questions about uploaded PDF documents.\n"
-        "Use only the information provided in the retrieved context.\n"
-        "Do not invent facts or extrapolate beyond what is stated.\n"
-        "If the answer cannot be found in the provided context, reply exactly:\n"
-        "\"I couldn't find this information in the uploaded document.\"\n"
-        "Answer clearly and concisely."
-    )
-
     def __init__(
         self,
-        embedding_service: EmbeddingService,
-        vector_store: VectorStore,
         api_key: str,
-        model_name: str = "gemini-2.5-flash"
+        model_name: str = "gemini-3.6-flash",
+        embedding_service: Optional[Any] = None,
+        vector_store: Optional[Any] = None,
+        top_k: int = 5,
     ):
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = model_name
         self.embedding_service = embedding_service
         self.vector_store = vector_store
-        self.model_name = model_name
-        self.api_key = api_key
+        self.top_k = top_k
 
-        # Initialize the Google GenAI client if an API key is provided
-        self.client: Optional[genai.Client] = None
-        if self.api_key:
-            self.client = genai.Client(api_key=self.api_key)
+    def _build_prompt(self, query: str, context_chunks: List[Dict[str, Any]]) -> str:
+        formatted_chunks = "\n\n".join(
+            f"[Doc: {c.get('filename', 'doc')} | Page: {c.get('page') or c.get('page_number', 1)}]\n{c['text']}"
+            for c in context_chunks
+        )
+        return f"""You are a precise, document-grounded AI assistant.
+Answer the user's question STRICTLY based on the context snippets below.
+If the context does not contain sufficient facts to answer, respond with exactly:
+"I couldn't find this information in the uploaded document."
 
-    def _build_context(self, retrieved_chunks: List[Dict[str, Any]]) -> str:
-        """
-        Formats retrieved chunk dictionaries into an indexed context block.
-        """
-        context_parts = []
-        for i, chunk in enumerate(retrieved_chunks, start=1):
-            filename = chunk.get("filename", "unknown")
-            page = chunk.get("page_number", 0)
-            text = chunk.get("text", "").strip()
-            context_parts.append(f"[Excerpt {i} | File: {filename} | Page: {page}]\n{text}")
+--- CONTEXT ---
+{formatted_chunks}
 
-        return "\n\n".join(context_parts)
+--- USER QUESTION ---
+{query}
+"""
 
-    def _extract_sources(self, retrieved_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Extracts deduplicated filename and page combinations from retrieved chunks.
-        """
-        seen = set()
-        sources = []
-        for chunk in retrieved_chunks:
-            filename = chunk.get("filename")
-            page = chunk.get("page_number")
-            if filename and page:
-                key = (filename, page)
-                if key not in seen:
-                    seen.add(key)
-                    sources.append({"filename": filename, "page": page})
-        return sources
+    def answer_query(
+        self,
+        query: str,
+        context_chunks: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        if context_chunks is None:
+            if self.embedding_service and self.vector_store:
+                q_vec = self.embedding_service.encode([query])
+                context_chunks = self.vector_store.search(q_vec, top_k=self.top_k)
+            else:
+                context_chunks = []
 
-    def answer_question(self, question: str, top_k: int = 5) -> Dict[str, Any]:
-        """
-        Executes end-to-end RAG question answering.
-
-        Args:
-            question: The user's query string.
-            top_k: Number of chunks to retrieve from FAISS.
-
-        Returns:
-            Dict containing:
-            - answer: str
-            - sources: List[Dict[str, Any]]
-        """
-        question = question.strip()
-        if not question:
-            return {
-                "answer": "Please ask a valid question.",
-                "sources": []
-            }
-
-        # 1. Embed query
-        query_vec = self.embedding_service.generate_embeddings(question)
-
-        # 2. Retrieve top chunks from FAISS
-        retrieved_chunks = self.vector_store.search(query_vec, top_k=top_k)
-
-        if not retrieved_chunks:
+        if not context_chunks:
             return {
                 "answer": "I couldn't find this information in the uploaded document.",
-                "sources": []
+                "sources": [],
             }
 
-        # 3. Assemble formatted context
-        context_text = self._build_context(retrieved_chunks)
-
-        # 4. Verify API key
-        if not self.client:
-            raise ValueError(
-                "Gemini API key is not configured. Please set GEMINI_API_KEY in your .env file."
-            )
-
-        # 5. Call LLM with strict grounding prompt
-        prompt = (
-            f"Context:\n{context_text}\n\n"
-            f"Question:\n{question}\n\n"
-            f"Answer:"
-        )
-
+        prompt = self._build_prompt(query, context_chunks)
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=self.SYSTEM_INSTRUCTION,
-                temperature=0.0  # Zero temperature for deterministic, hallucination-free answers
-            )
+            config=types.GenerateContentConfig(temperature=0.0),
+        )
+        answer_text = response.text or "I couldn't find this information in the uploaded document."
+
+        if "I couldn't find this information" in answer_text:
+            return {"answer": answer_text, "sources": []}
+
+        seen = set()
+        sources = []
+        for c in context_chunks:
+            filename = c.get("filename", "document.pdf")
+            page = c.get("page") or c.get("page_number", 1)
+            doc_id = c.get("document_id", "")
+            key = (filename, page, doc_id)
+            if key not in seen:
+                seen.add(key)
+                sources.append({
+                    "filename": filename,
+                    "page": page,
+                    "document_id": doc_id,
+                })
+        return {"answer": answer_text, "sources": sources}
+
+    # Backward compatibility method alias for unit tests
+    def answer_question(self, query: str, context_chunks: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        return self.answer_query(query=query, context_chunks=context_chunks)
+
+    async def stream_answer(
+        self, query: str, context_chunks: List[Dict[str, Any]]
+    ) -> AsyncGenerator[str, None]:
+        if not context_chunks:
+            fallback = json.dumps({
+                "type": "token",
+                "token": "I couldn't find this information in the uploaded document.",
+            })
+            done_event = json.dumps({"type": "done", "sources": []})
+            yield f"data: {fallback}\n\n"
+            yield f"data: {done_event}\n\n"
+            return
+
+        prompt = self._build_prompt(query, context_chunks)
+        seen = set()
+        sources = []
+        for c in context_chunks:
+            filename = c.get("filename", "document.pdf")
+            page = c.get("page") or c.get("page_number", 1)
+            doc_id = c.get("document_id", "")
+            key = (filename, page, doc_id)
+            if key not in seen:
+                seen.add(key)
+                sources.append({
+                    "filename": filename,
+                    "page": page,
+                    "document_id": doc_id,
+                })
+
+        response_stream = self.client.models.generate_content_stream(
+            model=self.model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.0),
         )
 
-        raw_answer = response.text.strip() if response.text else ""
+        full_text = ""
+        for chunk in response_stream:
+            if chunk.text:
+                full_text += chunk.text
+                payload = json.dumps({"type": "token", "token": chunk.text})
+                yield f"data: {payload}\n\n"
 
-        # 6. If the model indicates missing info, omit irrelevant sources
-        if "I couldn't find this information" in raw_answer:
+        if "I couldn't find this information" in full_text:
             sources = []
-        else:
-            sources = self._extract_sources(retrieved_chunks)
 
-        return {
-            "answer": raw_answer,
-            "sources": sources
-        }
+        done_event = json.dumps({"type": "done", "sources": sources})
+        yield f"data: {done_event}\n\n"

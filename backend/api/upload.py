@@ -1,81 +1,125 @@
-﻿import os
+import uuid
 import shutil
+from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request
-from backend.models.schemas import UploadResponse
-from backend.services.pdf_processor import PDFProcessor, PDFProcessingError
+from backend.config import settings
+from backend.models.schemas import DocumentUploadResponse, DocumentListResponse, DocumentMetadata
+from fastapi import APIRouter, File, UploadFile, HTTPException
 
 router = APIRouter()
 
-MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB limit
 
-
-@router.post("/upload", response_model=UploadResponse)
+@router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_pdf(request: Request, file: UploadFile = File(...)):
-    # 1. Validate file extension
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are supported."
-        )
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # 2. Check file size
-    file.file.seek(0, os.SEEK_END)
-    file_size = file.file.tell()
-    file.file.seek(0)
+    app_state = request.app.state
+    upload_dir = getattr(getattr(app_state, "config", None), "UPLOAD_DIR", settings.UPLOAD_DIR)
+    doc_id = str(uuid.uuid4())[:8]
 
-    if file_size == 0:
-        raise HTTPException(status_code=400, detail="Uploaded PDF file is empty.")
-    if file_size > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File exceeds maximum allowed size of 20 MB ({file_size / (1024*1024):.1f} MB uploaded)."
-        )
+    save_dir = Path(upload_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"{doc_id}_{file.filename}"
 
-    # 3. Save PDF to local disk
-    upload_dir = request.app.state.settings.UPLOAD_DIR
-    os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
+    with open(save_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to store file: {str(e)}")
+    processor = getattr(app_state, "pdf_processor", None)
+    if not processor:
+        from backend.services.pdf_processor import PDFProcessor
+        processor = PDFProcessor()
 
-    # 4. Extract text page-by-page
-    processor = PDFProcessor()
-    try:
-        pages_data = processor.extract_text_by_page(file_path)
-    except PDFProcessingError as e:
-        # Clean up unreadable file
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=400, detail=str(e))
+    # Call PDFProcessor's actual method: extract_text_by_page
+    if hasattr(processor, "extract_text_by_page"):
+        raw_pages = processor.extract_text_by_page(str(save_path))
+    elif hasattr(processor, "extract_text"):
+        raw_pages = processor.extract_text(str(save_path))
+    elif hasattr(processor, "extract_pages"):
+        raw_pages = processor.extract_pages(str(save_path))
+    else:
+        raise HTTPException(status_code=500, detail="No PDF text extraction method available.")
 
-    # 5. Chunk text
-    chunker = request.app.state.chunker
-    chunks = chunker.chunk_pages(pages_data)
+    if not raw_pages:
+        raise HTTPException(status_code=400, detail="PDF has no extractable text.")
 
+    # Normalize extracted pages so each dict has filename, page_number, and text
+    normalized_pages = []
+    for idx, item in enumerate(raw_pages):
+        if isinstance(item, str):
+            if item.strip():
+                normalized_pages.append({
+                    "filename": file.filename,
+                    "page_number": idx + 1,
+                    "page": idx + 1,
+                    "text": item,
+                })
+        elif isinstance(item, dict):
+            page_copy = item.copy()
+            page_copy.setdefault("filename", file.filename)
+            page_copy.setdefault("page_number", idx + 1)
+            page_copy.setdefault("page", page_copy["page_number"])
+            if page_copy.get("text", "").strip():
+                normalized_pages.append(page_copy)
+
+    if not normalized_pages:
+        raise HTTPException(status_code=400, detail="PDF has no extractable text.")
+
+    chunker = getattr(app_state, "chunker", None)
+    if not chunker:
+        from backend.services.chunker import TextChunker
+        chunker = TextChunker()
+
+    chunks = chunker.chunk_pages(normalized_pages)
     if not chunks:
-        raise HTTPException(status_code=400, detail="Could not create any text chunks from document.")
+        raise HTTPException(status_code=400, detail="PDF text yielded no chunks.")
 
-    # 6. Generate embeddings
-    chunk_texts = [c["text"] for c in chunks]
-    embedding_service = request.app.state.embedding_service
-    embeddings = embedding_service.generate_embeddings(chunk_texts)
+    texts = [c["text"] for c in chunks]
+    embeddings_service = getattr(app_state, "embeddings", None)
+    if not embeddings_service:
+        from backend.services.embeddings import EmbeddingService
+        embeddings_service = EmbeddingService(model_name=settings.EMBEDDING_MODEL_NAME)
 
-    # 7. Add to FAISS index & persist
-    vector_store = request.app.state.vector_store
-    vector_store.create_and_add(embeddings, chunks)
-    vector_store_dir = request.app.state.settings.VECTOR_STORE_DIR
-    vector_store.save(vector_store_dir)
+    embeddings = embeddings_service.encode(texts)
 
-    # Mark vector index as active
-    request.app.state.active_pdf = file.filename
+    vector_store = getattr(app_state, "vector_store", None)
+    if not vector_store:
+        from backend.services.vector_store import VectorStoreService
+        vector_store = VectorStoreService(store_dir=settings.VECTOR_STORE_DIR)
 
-    return UploadResponse(
-        message="PDF processed successfully",
+    total_chunks = vector_store.add_document(
+        document_id=doc_id,
         filename=file.filename,
-        pages=len(pages_data),
-        chunks=len(chunks)
+        page_count=len(normalized_pages),
+        embeddings=embeddings,
+        chunks=chunks,
+    )
+
+    if hasattr(app_state, "hybrid_retriever") and app_state.hybrid_retriever:
+        app_state.hybrid_retriever._build_bm25()
+
+    return DocumentUploadResponse(
+        document_id=doc_id,
+        filename=file.filename,
+        pages=len(normalized_pages),
+        chunks=len(chunks),
+        total_indexed_chunks=total_chunks,
+        message="Document processed and indexed successfully."
+    )
+
+
+@router.get("/documents", response_model=DocumentListResponse)
+async def get_documents(request: Request):
+    app_state = request.app.state
+    vector_store = getattr(app_state, "vector_store", None)
+    if not vector_store:
+        return DocumentListResponse(documents=[], total_documents=0, total_chunks=0)
+
+    docs = vector_store.list_documents()
+    metadata_list = [DocumentMetadata(**d) for d in docs]
+    total_chunks = sum(d["chunk_count"] for d in docs)
+    return DocumentListResponse(
+        documents=metadata_list,
+        total_documents=len(metadata_list),
+        total_chunks=total_chunks
     )

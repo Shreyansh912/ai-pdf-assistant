@@ -1,115 +1,128 @@
-﻿import json
 import os
-from typing import List, Dict, Any, Optional
+import json
 import faiss
 import numpy as np
+from typing import List, Dict, Any, Optional
 
 
 class VectorStoreError(Exception):
-    """Exception raised for vector store operations failures."""
+    """Custom exception for VectorStore operations."""
     pass
 
 
-class VectorStore:
-    """
-    Manages a local FAISS index alongside a synchronized JSON metadata store.
-    """
-
-    def __init__(self, dimension: int = 384):
+class VectorStoreService:
+    def __init__(self, store_dir: str = "data/vector_store", dimension: int = 384):
+        self.store_dir = store_dir
         self.dimension = dimension
-        # IndexFlatIP performs exact brute-force search using Inner Product (Cosine similarity for unit vectors)
-        self.index: faiss.IndexFlatIP = faiss.IndexFlatIP(self.dimension)
+        self.index_path = os.path.join(store_dir, "faiss_index.bin")
+        self.metadata_path = os.path.join(store_dir, "metadata.json")
+        self.registry_path = os.path.join(store_dir, "doc_registry.json")
+        
+        os.makedirs(store_dir, exist_ok=True)
+        self.index = faiss.IndexFlatIP(self.dimension)
         self.metadata: List[Dict[str, Any]] = []
+        self.registry: Dict[str, Dict[str, Any]] = {}
+        self._load()
 
     def create_and_add(self, embeddings: np.ndarray, chunks: List[Dict[str, Any]]) -> None:
-        """
-        Populates the FAISS index and stores chunk metadata.
-
-        Args:
-            embeddings: Float32 numpy array of shape (N, dimension).
-            chunks: List of chunk metadata dicts of length N.
-        """
+        """Backward-compatible ingestion method for test suites."""
         if len(embeddings) != len(chunks):
             raise VectorStoreError(
-                f"Mismatch: Got {len(embeddings)} embeddings but {len(chunks)} chunk metadata records."
+                f"Embeddings count ({len(embeddings)}) does not match chunks count ({len(chunks)})"
             )
-
-        if len(embeddings) == 0:
-            return
-
-        if embeddings.dtype != np.float32:
-            embeddings = embeddings.astype(np.float32)
-
-        # Reset any existing in-memory state
         self.index = faiss.IndexFlatIP(self.dimension)
-        self.metadata = []
+        if len(embeddings) > 0:
+            self.index.add(embeddings.astype(np.float32))
+        self.metadata = chunks.copy()
 
-        # Add vectors to FAISS and record metadata
-        self.index.add(embeddings)
-        self.metadata = list(chunks)
+    def add_document(
+        self,
+        document_id: str,
+        filename: str,
+        page_count: int,
+        embeddings: np.ndarray,
+        chunks: List[Dict[str, Any]],
+    ) -> int:
+        if embeddings.shape[0] != len(chunks):
+            raise VectorStoreError("Embedding row count must match chunk count.")
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        """
-        Searches the FAISS index for the top_k most similar chunks.
+        if embeddings.shape[0] == 0:
+            return len(self.metadata)
 
-        Args:
-            query_embedding: Float32 numpy array of shape (1, dimension).
-            top_k: Number of nearest neighbors to retrieve.
+        self.index.add(embeddings.astype(np.float32))
+        for chunk in chunks:
+            chunk_entry = {
+                "document_id": document_id,
+                "filename": filename,
+                "page": chunk.get("page") or chunk.get("page_number", 1),
+                "text": chunk["text"],
+            }
+            self.metadata.append(chunk_entry)
 
-        Returns:
-            List of dictionaries containing chunk data and a similarity 'score'.
-        """
+        self.registry[document_id] = {
+            "document_id": document_id,
+            "filename": filename,
+            "page_count": page_count,
+            "chunk_count": len(chunks),
+        }
+        self._save()
+        return len(self.metadata)
+
+    def search(
+        self,
+        query_vector: np.ndarray,
+        top_k: int = 5,
+        document_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         if self.index.ntotal == 0:
             return []
 
-        if query_embedding.dtype != np.float32:
-            query_embedding = query_embedding.astype(np.float32)
-
-        # Ensure 2D query shape: (1, dimension)
-        if query_embedding.ndim == 1:
-            query_embedding = np.expand_dims(query_embedding, axis=0)
-
-        k = min(top_k, self.index.ntotal)
-        scores, indices = self.index.search(query_embedding, k)
-
-        results: List[Dict[str, Any]] = []
+        search_k = min(self.index.ntotal, max(top_k * 4, 20) if document_id else top_k)
+        scores, indices = self.index.search(query_vector.astype(np.float32), search_k)
+        
+        results = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx == -1 or idx >= len(self.metadata):
+            if idx < 0 or idx >= len(self.metadata):
                 continue
-            item = dict(self.metadata[idx])
+            item = self.metadata[idx].copy()
+            if document_id and item.get("document_id") != document_id:
+                continue
             item["score"] = float(score)
             results.append(item)
-
+            if len(results) >= top_k:
+                break
         return results
 
-    def save(self, directory: str) -> None:
-        """
-        Serializes the FAISS index and metadata to a target folder.
-        """
-        os.makedirs(directory, exist_ok=True)
-        index_file = os.path.join(directory, "index.faiss")
-        metadata_file = os.path.join(directory, "metadata.json")
+    def list_documents(self) -> List[Dict[str, Any]]:
+        return list(self.registry.values())
 
-        try:
-            faiss.write_index(self.index, index_file)
-            with open(metadata_file, "w", encoding="utf-8") as f:
-                json.dump(self.metadata, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            raise VectorStoreError(f"Failed to save vector store: {str(e)}")
+    def save(self, path: Optional[str] = None) -> None:
+        target_dir = path or self.store_dir
+        os.makedirs(target_dir, exist_ok=True)
+        faiss.write_index(self.index, os.path.join(target_dir, "faiss_index.bin"))
+        with open(os.path.join(target_dir, "metadata.json"), "w", encoding="utf-8") as f:
+            json.dump(self.metadata, f, ensure_ascii=False, indent=2)
 
-    def load(self, directory: str) -> None:
-        """
-        Loads the FAISS index and metadata from disk into memory.
-        """
-        index_file = os.path.join(directory, "index.faiss")
-        metadata_file = os.path.join(directory, "metadata.json")
-
-        if not os.path.exists(index_file) or not os.path.exists(metadata_file):
-            raise VectorStoreError(f"Index or metadata not found in directory: {directory}")
-
-        try:
-            self.index = faiss.read_index(index_file)
-            with open(metadata_file, "r", encoding="utf-8") as f:
+    def load(self, path: Optional[str] = None) -> None:
+        target_dir = path or self.store_dir
+        idx_p = os.path.join(target_dir, "faiss_index.bin")
+        meta_p = os.path.join(target_dir, "metadata.json")
+        if os.path.exists(idx_p) and os.path.exists(meta_p):
+            self.index = faiss.read_index(idx_p)
+            with open(meta_p, "r", encoding="utf-8") as f:
                 self.metadata = json.load(f)
-        except Exception as e:
-            raise VectorStoreError(f"Failed to load vector store: {str(e)}")
+
+    def _save(self):
+        self.save(self.store_dir)
+        with open(self.registry_path, "w", encoding="utf-8") as f:
+            json.dump(self.registry, f, ensure_ascii=False, indent=2)
+
+    def _load(self):
+        self.load(self.store_dir)
+        if os.path.exists(self.registry_path):
+            with open(self.registry_path, "r", encoding="utf-8") as f:
+                self.registry = json.load(f)
+
+
+# Backward compatibility alias
+VectorStore = VectorStoreService
